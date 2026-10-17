@@ -1,0 +1,24 @@
+{
+  "nop_time": "17/10/2026 13:21",
+  "spa": [
+    {"symbol": "GBPUSD", "total": 0},
+    {"symbol": "AUDUSD", "total": -1},
+    {"symbol": "XAUUSD", "total": 4},
+    {"symbol": "HKK", "total": 3},
+    {"symbol": "JPK", "total": 0},
+    {"symbol": "OIL", "total": 0},
+    {"symbol": "XAGUSD", "total": 2}
+  ],
+  "stocks": [
+    {"symbol": "#HON.O", "total": -15},
+    {"symbol": "#NVDA", "total": 10},
+    {"symbol": "#UBER", "total": 15}
+  ],
+  "spa14": [
+    {"symbol": "AUDUSD", "total": -1.14},
+    {"symbol": "XAUUSD", "total": 2.86},
+    {"symbol": "HKK", "total": 2.14},
+    {"symbol": "XAGUSD", "total": 1.43}
+  ],
+  "unmapped_14k_suffixes": []
+}

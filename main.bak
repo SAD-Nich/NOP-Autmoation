@@ -1,0 +1,263 @@
+#include <iostream>
+#include <windows.h>
+#include <ctime>
+#include <set>
+#include <iomanip>
+
+#pragma comment(lib, "ws2_32.lib")
+#include "MT4ManagerAPI.h"
+#include "sqlite3.h"
+
+std::string TimestampToDateTime(time_t raw_time) {
+    if (raw_time <= 0) return "NULL";
+    struct tm dt;
+    localtime_s(&dt, &raw_time);
+    char buffer[20];
+    strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &dt);
+    return std::string(buffer);
+}
+
+std::string GetCmdType(int cmd) {
+    return cmd == 0 ? "BUY" : "SELL";
+}
+
+std::string GetOppositeCmdType(int cmd) {
+    return cmd == 0 ? "SELL" : "BUY";
+}
+
+// =========================================================
+// SQLite helpers
+// =========================================================
+sqlite3* OpenDatabase(const char* path) {
+    sqlite3* db = nullptr;
+    if (sqlite3_open(path, &db) != SQLITE_OK) {
+        std::cerr << "[DB ERROR] Gagal buka database: " << sqlite3_errmsg(db) << std::endl;
+        return nullptr;
+    }
+
+    const char* create_sql =
+        "CREATE TABLE IF NOT EXISTS trades ("
+        "  ticket      INTEGER NOT NULL,"
+        "  leg         TEXT NOT NULL,"          // 'N' atau 'L'
+        "  login       INTEGER NOT NULL,"
+        "  time        TEXT NOT NULL,"
+        "  type        TEXT NOT NULL,"
+        "  symbol      TEXT NOT NULL,"
+        "  lot         REAL NOT NULL,"
+        "  open_price  REAL,"
+        "  close_price REAL,"
+        "  status      TEXT NOT NULL,"
+        "  updated_at  TEXT DEFAULT CURRENT_TIMESTAMP,"
+        "  PRIMARY KEY (ticket, leg)"
+        ");";
+
+    char* err_msg = nullptr;
+    if (sqlite3_exec(db, create_sql, nullptr, nullptr, &err_msg) != SQLITE_OK) {
+        std::cerr << "[DB ERROR] Gagal buat tabel: " << err_msg << std::endl;
+        sqlite3_free(err_msg);
+        sqlite3_close(db);
+        return nullptr;
+    }
+
+    return db;
+}
+
+// Upsert satu baris (leg N atau L)
+void UpsertTradeLeg(sqlite3* db, int ticket, const char* leg, int login,
+    const std::string& time_str, const std::string& type,
+    const std::string& symbol, double lot,
+    double open_price, bool has_close_price, double close_price,
+    const std::string& status) {
+
+    const char* sql =
+        "INSERT INTO trades (ticket, leg, login, time, type, symbol, lot, open_price, close_price, status, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+        "ON CONFLICT(ticket, leg) DO UPDATE SET "
+        "  login=excluded.login, time=excluded.time, type=excluded.type, "
+        "  symbol=excluded.symbol, lot=excluded.lot, open_price=excluded.open_price, "
+        "  close_price=excluded.close_price, status=excluded.status, "
+        "  updated_at=CURRENT_TIMESTAMP;";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        std::cerr << "[DB ERROR] Prepare gagal: " << sqlite3_errmsg(db) << std::endl;
+        return;
+    }
+
+    sqlite3_bind_int(stmt, 1, ticket);
+    sqlite3_bind_text(stmt, 2, leg, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 3, login);
+    sqlite3_bind_text(stmt, 4, time_str.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, type.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 6, symbol.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_double(stmt, 7, lot);
+    sqlite3_bind_double(stmt, 8, open_price);
+    if (has_close_price) {
+        sqlite3_bind_double(stmt, 9, close_price);
+    } else {
+        sqlite3_bind_null(stmt, 9);
+    }
+    sqlite3_bind_text(stmt, 10, status.c_str(), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        std::cerr << "[DB ERROR] Insert/update gagal: " << sqlite3_errmsg(db) << std::endl;
+    }
+
+    sqlite3_finalize(stmt);
+}
+
+// =========================================================
+// Print + Save (console tetap jalan, plus simpan ke DB)
+// =========================================================
+void HandleOpenLeg(sqlite3* db, int ticket_num, int login, time_t open_time, int cmd,
+    LPCSTR symbol, double volume, double open_price) {
+
+    std::string time_str = TimestampToDateTime(open_time);
+    std::string type_str = GetCmdType(cmd);
+
+    std::cout << ticket_num << "N | " << login << " | " << time_str << " | "
+        << type_str << " | " << symbol << " | " << (volume / 100.0) << " | "
+        << open_price << " | NULL | OPEN" << std::endl;
+
+    UpsertTradeLeg(db, ticket_num, "N", login, time_str, type_str, symbol,
+        volume / 100.0, open_price, false, 0.0, "OPEN");
+}
+
+void HandleCloseLeg(sqlite3* db, int ticket_num, int login, int cmd,
+    LPCSTR symbol, double volume, time_t close_time,
+    double open_price, double close_price) {
+
+    std::string time_str = TimestampToDateTime(close_time);
+    std::string type_str = GetOppositeCmdType(cmd);
+
+    std::cout << ticket_num << "L | " << login << " | " << time_str << " | "
+        << type_str << " | " << symbol << " | " << (volume / 100.0) << " | "
+        << open_price << " | " << close_price << " | CLOSED" << std::endl;
+
+    UpsertTradeLeg(db, ticket_num, "L", login, time_str, type_str, symbol,
+        volume / 100.0, open_price, true, close_price, "CLOSED");
+}
+
+int main() {
+    sqlite3* db = OpenDatabase("trades.db");
+    if (db == nullptr) return -1;
+
+    CManagerFactory factory;
+    factory.Init("mtmanapi64.dll");
+
+    if (factory.WinsockStartup() != RET_OK) {
+        std::cerr << "Gagal menyalakan Winsock (Jaringan)." << std::endl;
+        sqlite3_close(db);
+        return -1;
+    }
+
+    CManagerInterface* manager = factory.Create(ManAPIVersion);
+    if (manager == nullptr) {
+        std::cerr << "Gagal membuat Manager Interface." << std::endl;
+        factory.WinsockCleanup();
+        sqlite3_close(db);
+        return -1;
+    }
+
+    if (manager->Connect("139.255.92.236:443") != RET_OK) {
+        std::cerr << "Gagal terkoneksi ke server." << std::endl;
+        manager->Release();
+        factory.WinsockCleanup();
+        sqlite3_close(db);
+        return -1;
+    }
+
+    if (manager->Login(1, "manager") != RET_OK) {
+        std::cerr << "Login gagal. Cek kredensial." << std::endl;
+        manager->Disconnect();
+        manager->Release();
+        factory.WinsockCleanup();
+        sqlite3_close(db);
+        return -1;
+    }
+
+    int target_login = 855700035;
+    int total_history = 0;
+
+    int time_from = (int)(time(NULL) - (30 * 24 * 60 * 60));
+    int time_to = (int)time(NULL) + 86400;
+
+    std::cout << "\nTicket | Login |  Time | Type | Product | Lot | Open Price | Close Price | Status" << std::endl;
+    std::cout << "--------------------------------------------------------------------------------------------------------" << std::endl;
+
+    std::set<int> open_tickets;
+    std::set<int> printed_tickets;
+
+    // A. Floating (OPEN) - dengan retry
+    const int MAX_RETRY = 3;
+    for (int attempt = 1; attempt <= MAX_RETRY; attempt++) {
+        int total_snapshot = 0;
+        int* order_snapshot_ids = manager->TradesSnapshot(&total_snapshot);
+        bool got_any = false;
+
+        if (order_snapshot_ids != nullptr && total_snapshot > 0) {
+            int record_count = total_snapshot;
+            TradeRecord* open_trades = manager->TradeRecordsRequest(order_snapshot_ids, &record_count);
+
+            if (open_trades != nullptr) {
+                for (int i = 0; i < record_count; i++) {
+                    if (open_trades[i].login == target_login &&
+                        open_trades[i].close_time == 0 &&
+                        (open_trades[i].cmd == 0 || open_trades[i].cmd == 1)) {
+
+                        int ticket_num = open_trades[i].order;
+                        if (open_tickets.find(ticket_num) == open_tickets.end()) {
+                            open_tickets.insert(ticket_num);
+                            got_any = true;
+                            HandleOpenLeg(db, ticket_num, open_trades[i].login,
+                                open_trades[i].open_time, open_trades[i].cmd,
+                                open_trades[i].symbol, open_trades[i].volume,
+                                open_trades[i].open_price);
+                        }
+                    }
+                }
+                manager->MemFree(open_trades);
+            }
+            manager->MemFree(order_snapshot_ids);
+        }
+
+        if (got_any || attempt == MAX_RETRY) break;
+        Sleep(1000);
+    }
+
+    // B. Closed (history) - N + L
+    TradeRecord* history_trades = manager->TradesUserHistory(target_login, time_from, time_to, &total_history);
+
+    if (history_trades != nullptr && total_history > 0) {
+        for (int i = 0; i < total_history; i++) {
+            if (history_trades[i].cmd == 6 || history_trades[i].cmd == 7) continue;
+
+            int ticket_num = history_trades[i].order;
+            if (open_tickets.find(ticket_num) != open_tickets.end()) continue;
+
+            if (printed_tickets.find(ticket_num) == printed_tickets.end()) {
+                printed_tickets.insert(ticket_num);
+
+                HandleOpenLeg(db, ticket_num, history_trades[i].login,
+                    history_trades[i].open_time, history_trades[i].cmd,
+                    history_trades[i].symbol, history_trades[i].volume,
+                    history_trades[i].open_price);
+
+                HandleCloseLeg(db, ticket_num, history_trades[i].login, history_trades[i].cmd,
+                    history_trades[i].symbol, history_trades[i].volume,
+                    history_trades[i].close_time,
+                    history_trades[i].open_price, history_trades[i].close_price);
+            }
+        }
+        manager->MemFree(history_trades);
+    }
+
+    manager->Disconnect();
+    manager->Release();
+    factory.WinsockCleanup();
+    sqlite3_close(db);
+
+    std::cout << "\nData tersimpan ke trades.db" << std::endl;
+
+    return 0;
+}

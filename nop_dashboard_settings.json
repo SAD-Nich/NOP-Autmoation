@@ -1,0 +1,36 @@
+{
+  "selected_name": "Niko",
+  "principals": {
+    "maxco": [
+      {
+        "symbol": "CHFJPY",
+        "value": -10.0
+      },
+      {
+        "symbol": "XAUUSD",
+        "value": 2.0
+      },
+      {
+        "symbol": "USDJPY",
+        "value": -15.0
+      }
+    ],
+    "monex": [
+      {
+        "symbol": "XAG",
+        "value": 1.0
+      }
+    ]
+  },
+  "name_options": [
+    "Andi",
+    "Ricardo",
+    "Budi",
+    "Othniel",
+    "Rionald",
+    "Arif",
+    "Niko",
+    "Daffa",
+    "Wahyu"
+  ]
+}
